@@ -95,9 +95,11 @@ def read_still_asset_id(url):
 # video side
 # --------------------------------------------------------------------------- #
 def build_mov(src_url, dst_url, asset_id, max_duration=DEFAULT_MAX_DURATION,
-              reencode=False):
+              reencode=False, still_time=None):
     """Rewrap src into a QuickTime .mov carrying the two Live Photo markers.
 
+    `still_time` places the still-image-time metadata at that second (the cover
+    frame); None keeps the historical behaviour of marking the last frame.
     Returns (frame_count, duration_seconds, still_time_seconds).
     """
     asset = AVF.AVURLAsset.assetWithURL_(src_url)
@@ -196,8 +198,15 @@ def build_mov(src_url, dst_url, asset_id, max_duration=DEFAULT_MAX_DURATION,
     if last_pts is None:
         raise RuntimeError("the reader produced no samples")
 
-    # the still image time goes on the very last frame we actually wrote
-    still_s = float(last_pts.value) / float(last_pts.timescale)
+    # the still-image-time marks the frame the still image represents.
+    # Default: the very last frame we actually wrote. `still_time` overrides it
+    # (e.g. the cover frame printed by compose_live.py) and is clamped into the
+    # clip, so the metadata and the extracted still can never disagree.
+    if still_time is not None:
+        still_s = max(0.0, min(float(still_time),
+                               float(last_pts.value) / float(last_pts.timescale)))
+    else:
+        still_s = float(last_pts.value) / float(last_pts.timescale)
     sit = AVF.AVMutableMetadataItem.metadataItem()
     sit.setKey_(STILL_IMAGE_TIME_KEY)
     sit.setKeySpace_(AVF.AVMetadataKeySpaceQuickTimeMetadata)
@@ -446,7 +455,8 @@ def main():
     print("[1/3] building MOV with content identifier + still-image-time track ...")
     n, dur_s, still_s = build_mov(video, mov_url, asset_id,
                                   max_duration=args.max_duration,
-                                  reencode=args.reencode)
+                                  reencode=args.reencode,
+                                  still_time=args.still_time)
     if args.still_time is not None:
         still_s = args.still_time
     print("      ->", mov_url.path(), os.path.getsize(mov_url.path()),

@@ -30,12 +30,16 @@ Method:
   * empty hold -> stroke-by-stroke draw -> crayon hold (optionally with a
     "boiling line" jitter, off by default) -> crossfade morph into the real
     photo (+settle scale) -> real hold.
-  * exports MP4 (libx264) and a downscaled looping GIF.
+  * exports MP4 (libx264), a downscaled looping GIF, and the **cover frame**
+    (the drawing-complete frame) as a PNG plus its exact timestamp — feed that
+    timestamp to stage 4 via `--still-time` so the Live Photo rests on the
+    finished drawing instead of the plain photo.
 
 Required packages: pillow numpy imageio imageio-ffmpeg (the imageio-ffmpeg encoder
 supplies the codec, so `ffmpeg` itself is not required).
 """
 import argparse
+import os
 
 import numpy as np
 from PIL import Image, ImageFilter
@@ -288,6 +292,11 @@ def main():
     ap.add_argument("--morph", type=int, default=36)
     ap.add_argument("--hold-real", type=int, default=24)
     ap.add_argument("--settle", type=float, default=0.05, help="morph settle scale (0 = off)")
+    ap.add_argument("--cover-png", default=None,
+                    help="where to write the cover frame, i.e. the drawing-complete "
+                         "frame (default: <out stem>-cover.png)")
+    ap.add_argument("--no-cover-png", action="store_true",
+                    help="do not write the cover png (the cover time is still printed)")
     ap.add_argument("--gif-scale", type=int, default=2, help="gif downscale factor")
     ap.add_argument("--max-seconds", type=float, default=None,
                     help="budget the whole clip into <= N seconds by scaling every "
@@ -413,6 +422,19 @@ def main():
         frames.append(crayon_a * (1 - t) + scaled * t)
     frames += [real_a.copy() for _ in range(a.hold_real)]
     print(f"frames {len(frames)}, duration {len(frames)/a.fps:.2f}s")
+
+    # ---- cover frame = the drawing-complete frame (last frame of the draw stage)
+    # The Live Photo should rest on the finished drawing, not on the plain photo:
+    # the drawing is the payoff, and the still must be the frame the drawing is
+    # complete in. Timestamp is the centre of that frame so the extractor in
+    # stage 4 lands on it rather than on the neighbouring one.
+    cover_i = min(a.hold_empty + a.draw - 1, len(frames) - 1)
+    cover_t = (cover_i + 0.5) / float(a.fps)
+    print(f"cover frame {cover_i} @ {cover_t:.4f}s  ->  stage 4: --still-time {cover_t:.4f}")
+    if not a.no_cover_png:
+        cover_path = a.cover_png or (os.path.splitext(a.out)[0] + "-cover.png")
+        Image.fromarray(frames[cover_i].astype(np.uint8)).save(cover_path)
+        print(f"cover png -> {cover_path}")
 
     iio.imwrite(a.out, [f.astype(np.uint8) for f in frames],
                 macro_block_size=8, fps=a.fps, codec="libx264", quality=8)

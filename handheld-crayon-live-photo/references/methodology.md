@@ -20,14 +20,25 @@ pipeline is unchanged.
 |-------|-----------|----------------|
 | real  | original photo, hand holding `<OBJECT>` | the source photo |
 | crayon | same hand, `<OBJECT>` rendered as crayon colour blocks | image-to-image: real photo (+ optional style ref) |
-| empty | same hand, `<OBJECT>` removed, fingers curled as if holding nothing | image-to-image: **the crayon keyframe** + "remove the object" |
+| empty | same hand, `<OBJECT>` removed, every finger in its exact input position | image-to-image: **the crayon keyframe** + "erase the object" (pose-agnostic inpainting) |
 
 ### Why the empty hand is derived from the crayon keyframe (not the source)
 
-Asking the model to "remove the object from the source" returns an **open palm** —
-the fingers uncurl. Deriving the empty keyframe from the crayon keyframe (which
-already has the correct curled hand pose) preserves the pose, so the
-empty → crayon → real sequence never shows the fingers jumping.
+The empty keyframe is an **object-removal inpainting task, not a re-posing
+task**. Deriving it from the crayon keyframe (rather than the source) keeps
+framing, background and hand scale identical to the frame it will be diffed
+against, and reduces the model's job to refilling the object region only — the
+fewer pixels that change, the less likely the hand is to move.
+
+The cardinal rule: **never prescribe a pose**. Hands hold objects in many
+ways — a narrow bottle is gripped with curled fingers, a wide cup or plate is
+held with the fingers fanned flat across its front, a phone is pinched. If the
+prompt says "fingers stay curled" or "do not open the palm", the model obeys
+the pose words and substitutes a canonical gripping hand (typically a fist)
+that never existed in the source — anatomically wrong for a fanned grip, and
+visibly discontinuous when empty → crayon → real plays. Instead, lock the
+**geometry**: every finger keeps its input-image position, length, direction,
+separation and bend, whatever grip that happens to be.
 
 ## Stage 1 prompt template (crayon keyframe, colour-matched, blocky)
 
@@ -69,21 +80,45 @@ Notes
 - Generate at the largest sensible size (portrait sources: 2:3 or 9:16) so the
   empty keyframe and the alignment search have pixels to work with.
 
-## Stage 2 prompt template (empty keyframe)
+## Stage 2 prompt template (empty keyframe, pose-agnostic inpainting)
 
 Input: the **crayon keyframe**. Keep the object description to a minimum so the
-model does not invent a replacement object.
+model does not invent a replacement object. Do not name any hand pose —
+describe the lock geometrically instead.
 
 ```
-Edit the first image. Remove the crayon-drawn <OBJECT> completely so the hand is
-empty, holding nothing.
-Keep the hand EXACTLY as it is now: same position, same scale, same pose, fingers
-still gently curled and slightly apart as if holding an invisible <OBJECT> —
-do NOT open the palm, do NOT straighten or spread the fingers.
-Keep the arm, wrist, sleeve, nails, ring, background, lighting, camera angle and
-framing exactly the same. Photorealistic hand and background.
+Edit the first image. Erase only the crayon-drawn <OBJECT>, refilling those
+pixels with the existing background. This is pure object removal, not a re-pose.
+The hand must not change in any way. Every finger stays exactly where it is in
+the input image: same position, same length, same direction, same gaps between
+the fingers, same knuckle bend, same skin folds and shading. Whatever grip the
+hand has in the input is the grip it keeps.
+Do NOT substitute a generic "holding something" pose: do NOT curl the fingers
+up into a fist or closed grip, do NOT straighten them into a flat open palm,
+do NOT spread them wider or squeeze them together. Fingers that lie fanned out
+across the object stay fanned out; fingers that are curled stay curled.
+Keep the arm, wrist, sleeve, nails, ring, background, lighting, camera angle
+and framing exactly the same. Photorealistic hand and background.
 Leave no drawn, sketchy, crayon or scribble residue anywhere in the image.
 ```
+
+Notes
+
+- **Never write "fingers curled" / "gently curled" / "do not open the palm" as
+  the target pose.** Earlier versions of this template did, and it caused a
+  real failure: on a wide cup held with the fingers fanned flat across its
+  front, the model obeyed the pose words and curled the hand into a fist —
+  anatomically impossible for that grip and clearly discontinuous with the
+  real photo. The only correct pose is the one in the input image; state the
+  lock per finger, never by pose name.
+- The "do NOT curl / do NOT straighten" lines are *guardrails against both
+  canonical poses* (fist and open palm), not a description of the desired
+  pose. Keep both halves; dropping the fist half reintroduces the failure.
+- If the model still re-poses the hand, add the observable facts of *this*
+  grip as observations, not instructions — e.g. "the four fingers lie fanned
+  out across where the object was, fingertips apart, thumb vertical on the
+  left". Describing what is visible is safe; prescribing what the pose should
+  be is not.
 
 ## Composition method (the bundled script)
 
@@ -120,11 +155,29 @@ knobs and warnings are understandable.
    The crayon hold is still by default; `--boiling` restores the ±1–2 px hand-drawn
    wobble for users who want it.
 9. **Export.** libx264 MP4 + a looping GIF (`--gif-scale`, sampled to ≈12 fps).
+10. **Cover frame.** The frame the still image should show is the
+    **drawing-complete frame** — the last frame of the draw stage, i.e. the
+    finished crayon drawing before the morph. The script computes its index
+    (`hold_empty + draw - 1`), prints the timestamp to pass on, and writes the
+    frame as `<out stem>-cover.png` for eyeballing:
+
+    ```
+    cover frame 87 @ 2.9167s  ->  stage 4: --still-time 2.9167
+    ```
+
+    The timestamp is the **centre** of that frame (`(i + 0.5) / fps`) so the
+    AVAssetImageGenerator in stage 4 cannot snap to the neighbouring frame.
+    `--cover-png` moves the file; `--no-cover-png` skips it.
+
+    Why not the last frame: the last frame is the plain real photo, so the
+    asset at rest looks like an ordinary picture and the drawing — the whole
+    point of the effect — is invisible until someone presses. The drawing is
+    the payoff; it belongs on the cover.
 
 To replay on a fresh photo, only the two generation calls change; the script is
 fully deterministic given the three frames.
 
-10. **Duration budget.** When the result is going into a Live Photo, pass
+11. **Duration budget.** When the result is going into a Live Photo, pass
     `--max-seconds` (4.6 is a safe budget). Every stage is scaled by the same
     factor, so the pacing stays in proportion while the total drops under the
     ~5 s Live Photo ceiling. Without it the defaults run ≈5.1 s and the
@@ -133,7 +186,8 @@ fully deterministic given the three frames.
 ## Stage 4 — packaging as a native Live Photo
 
 ```bash
-python3 scripts/make_livephoto.py --video live.mp4 --out-dir pair/ --jpeg
+python3 scripts/make_livephoto.py --video live.mp4 --out-dir pair/ --jpeg \
+    --still-time <cover time printed by stage 3>
 ```
 
 The composed MP4 is not the deliverable. The packager
@@ -141,8 +195,8 @@ The composed MP4 is not the deliverable. The packager
 1. rewraps it into `.mov` by **passthrough** (no re-encode, frames identical),
    capped at `--max-duration` (default 4.9 s);
 2. writes the movie-level `com.apple.quicktime.content.identifier`;
-3. appends a timed `com.apple.quicktime.still-image-time` sample on the **last
-   frame** — the frame the still shows;
+3. appends a timed `com.apple.quicktime.still-image-time` sample at the **cover
+   time** — the drawing-complete frame the still shows;
 4. extracts that frame from the finished MOV and writes it as HEIC (optionally
    also JPEG) carrying `MakerApple[17]` with the same identifier. Deriving the
    still from the MOV rather than re-using a source frame is deliberate: the two
@@ -151,9 +205,12 @@ The composed MP4 is not the deliverable. The packager
 6. creates one `PHAsset` from the two resources and reports `is_photoLive`,
    `playbackStyle` and the resource list.
 
-Because the still is the last frame, the finished Live Photo rests on the real
-photo and long-press reveals the drawing — which is the intended reading of the
-effect. `--still-time` or `--still-png` override it.
+Because the still is the cover frame, the finished Live Photo **rests on the
+finished crayon drawing** and long-press plays the whole sequence through to the
+real photo — which is the intended reading of the effect. Omit `--still-time`
+only if you deliberately want the plain photo as the cover (the packager then
+defaults to the last frame); `--still-png` replaces the still source entirely,
+at the cost of losing the "cannot disagree" guarantee of point 4.
 
 PhotoKit needs to run inside an app bundle that declares the photo usage
 strings; see `references/live-photo-spec.md` and `scripts/make_verifier_app.py`.
@@ -184,6 +241,7 @@ Photo). For Live Photo output add `--max-seconds 4.6`, which rescales to
 | New input | What changes | What does not |
 |---|---|---|
 | A different drink / food / prop | Stage 1 prompt colour regions only | everything else |
+| A fanned/spread grip (wide cup, plate, book) | nothing — Stage 2 is pose-agnostic; do NOT add "keep fingers curled" | everything else |
 | An object with many fine regions (a printed package) | state the 2–3 dominant blocks and explicitly tell the model to drop the rest | component / path / reveal logic |
 | Two hands, or an object spanning both | nothing structural; the silhouette is still "where the two frames differ" | — |
 | A landscape photo | `--canvas-ratio 16:9` so the fit-crop does not throw the frame away | — |
@@ -198,8 +256,11 @@ Photo). For Live Photo output add `--max-seconds 4.6`, which rescales to
 - **"silhouette is very small" warning.** The object was not detected — either the
   threshold is too high for a low-saturation object, or the empty keyframe still
   contains a ghost of the object. Regenerate Stage 2 or set `--seed-x/--seed-y`.
-- **Empty-hand pose drift.** See the keyframe section — derive the empty keyframe
-  from the crayon keyframe, and keep the "do not uncurl the fingers" instruction.
+- **Empty hand becomes a fist (or an open palm).** The prompt named a pose and
+  the model substituted a canonical grip — most often a fist on wide objects
+  that are actually held with a fanned grip. Remove every pose word from the
+  Stage 2 prompt, restate it as pure object removal with a per-finger position
+  lock (see the keyframe section), and regenerate.
 - **Watermark ghost.** The band may not match the generator's placement; adjust
   `--wm-y0` (and `--wm-x0`) after eyeballing a generated frame.
 - **Hand / object alignment jump on morph.** The built-in alignment search fixes

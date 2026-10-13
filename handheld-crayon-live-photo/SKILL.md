@@ -11,8 +11,9 @@ Output: **a native Apple Live Photo** in which the hand starts empty, a chunky
 crayon version of the drink is coloured in stroke by stroke, and the drawing then
 settles into the real photo.
 
-At rest the Live Photo shows the real photo. Long-press (or the
-lock-screen press) plays the whole drawing.
+At rest the Live Photo shows the **finished crayon drawing** (the cover frame).
+Long-press (or the lock-screen press) plays the whole sequence: empty hand →
+stroke-by-stroke drawing → morph → the real photo.
 
 ## Non-negotiable output contract
 
@@ -53,10 +54,16 @@ Input: the source photo. Rewrite the template in
 ### Stage 2 — empty keyframe (image-to-image, 1 generation)
 
 Input: **the crayon keyframe**, never the source photo. Ask for the crayon
-drink to be removed and the hand left empty with fingers still curled in exactly
-the pose that held it, plus an explicit "do not open the palm / do not
-straighten or spread the fingers". Deriving it from the source makes the model
-uncurl the fingers into an open palm and the continuity breaks.
+object to be erased and the background filled back in, framed as a **pure
+object-removal inpainting task**: every finger must stay exactly where it is
+in the input (same position, length, direction, separation and bend), and the
+prompt must **not name any pose**. Never write "fingers curled" or "do not
+open the palm" — grips differ (a narrow bottle is gripped with curled fingers,
+a wide cup is held with the fingers fanned flat across its front), and
+prescribing a canonical grip makes the model invent a fist or an open palm
+that never existed in the source. Deriving from the crayon keyframe (not the
+source) keeps framing and scale identical to the frame it will be diffed
+against, so only the object region needs to change.
 
 ### Stage 3 — compose the animation
 
@@ -85,18 +92,30 @@ empty hold → draw → crayon hold → morph → real hold. The crayon hold is
 Read the printed object centre and silhouette size before moving on — the
 script warns when the silhouette looks implausible.
 
+It also prints the **cover frame** — the drawing-complete frame — and writes it
+as `<out stem>-cover.png`:
+
+```
+cover frame 87 @ 2.9167s  ->  stage 4: --still-time 2.9167
+cover png -> live-cover.png
+```
+
+That timestamp is the one stage 4 needs. `--cover-png` moves the file,
+`--no-cover-png` skips writing it (the time is still printed).
+
 ### Stage 4 — package as a native Live Photo
 
 ```bash
 python3 scripts/make_livephoto.py \
-    --video live.mp4 --out-dir pair/ --jpeg
+    --video live.mp4 --out-dir pair/ --jpeg \
+    --still-time <cover time printed by stage 3>
 ```
 
 1. Rewraps the clip into a `.mov` (lossless passthrough, no re-encode), capped
    at `--max-duration` (default 4.9 s).
 2. Writes the movie-level content identifier.
-3. Appends a timed metadata track carrying `still-image-time` on the **last
-   frame** — that is the frame the still image represents.
+3. Appends a timed metadata track carrying `still-image-time` at the **cover
+   time** — the drawing-complete frame the still image represents.
 4. Extracts that exact frame out of the MOV and writes it as HEIC (and
    optionally JPEG) with `MakerApple[17]` set to the same identifier, so the
    still and the video can never disagree.
@@ -132,6 +151,13 @@ directory is `/`, so relative paths fail. Once granted, the decision sticks for
 that bundle, so later runs need no dialog. `--no-import` skips PhotoKit
 entirely and only builds and verifies the files.
 
+**Re-running with different arguments: rebuild the bundle.** `open -a
+LPVerify.app --args ...` does **not** replace the command embedded at build
+time — the app runs what it was built with, so a changed `--still-time`,
+`--out-dir` or any other flag silently does not apply (and the log's first
+line, which echoes the command, is the only tell). Re-run
+`make_verifier_app.py --out <new.app> --run -- <full command>` instead.
+
 ## Requirements
 
 - macOS. Python 3 with `pillow numpy imageio imageio-ffmpeg` (stage 3) and
@@ -157,9 +183,12 @@ entirely and only builds and verifies the files.
 - **Any stroke density.** `--step-y` (row spacing) and `--brush-r`.
 - **Other drawing styles.** Swap the Stage 1 wording for marker pen, oil
   pastel, chalk or flat vector; stages 2–4 are unchanged.
-- **Still image choice.** Default is the last frame (the real photo), which is
-  what you want here: at rest it looks like a normal photo and the drawing is
-  the surprise. `--still-time` / `--still-png` override it.
+- **Still image choice (the cover).** The cover is the **drawing-complete
+  frame**, not the last frame. At rest the asset should show the finished
+  crayon drawing — that is the payoff of the effect, and a resting frame of the
+  plain photo hides it. Stage 3 prints the exact `--still-time`; leave it at
+  the default last frame only if you deliberately want the plain photo as the
+  cover (`--still-png` overrides the still source entirely).
 - **Escape hatches.** `--seed-x/--seed-y` override the auto object centre,
   `--diff-thresh` the silhouette threshold, `--no-align` skips alignment.
   Only reach for them when the printed warnings say the auto values failed.
@@ -182,8 +211,11 @@ entirely and only builds and verifies the files.
   Force large flat blocks.
 - **Watermark** burned into generated frames, flush to the bottom-right corner.
   Patched by default; eyeball one crayon-hold frame before delivering.
-- **Empty-hand pose drift** if derived from the source instead of the crayon
-  keyframe.
+- **Canonical-pose drift in the empty hand.** Naming a pose in Stage 2 (any
+  pose, including "fingers curled" / "do not open the palm") makes the model
+  substitute a stereotyped "holding" hand — usually a fist — that is not the
+  grip in the source. Keep Stage 2 pose-agnostic and lock per-finger geometry
+  instead. Derive from the crayon keyframe, never the source.
 
 ## Bundled resources
 
