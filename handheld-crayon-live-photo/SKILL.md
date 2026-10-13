@@ -92,16 +92,21 @@ empty hold → draw → crayon hold → morph → real hold. The crayon hold is
 Read the printed object centre and silhouette size before moving on — the
 script warns when the silhouette looks implausible.
 
-It also prints the **cover frame** — the drawing-complete frame — and writes it
-as `<out stem>-cover.png`:
+It also prints the **cover frame** — the complete crayon drawing, taken from the
+crayon keyframe — and writes it as `<out stem>-cover.png`:
 
 ```
-cover frame 87 @ 2.9167s  ->  stage 4: --still-time 2.9167
+cover frame 78 @ 2.6167s  ->  stage 4: --still-time 2.6167   (complete drawing, residual 0.000)
 cover png -> live-cover.png
 ```
 
 That timestamp is the one stage 4 needs. `--cover-png` moves the file,
 `--no-cover-png` skips writing it (the time is still printed).
+
+The cover comes from the **keyframe, not from the last frame of the reveal**:
+the reveal is a soft-edged ramp, and pixels the brush never crosses can only
+reach half opacity there — on a still image that reads as missing colour
+blocks. `residual` is the mean `|cover − crayon|`; expect 0.000.
 
 ### Stage 4 — package as a native Live Photo
 

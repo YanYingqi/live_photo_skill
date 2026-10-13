@@ -46,6 +46,12 @@ from PIL import Image, ImageFilter
 import imageio.v3 as iio
 import imageio
 
+# Width of the soft edge of the reveal, as a fraction of the draw progress. It
+# also sets the overshoot the draw stage runs past 1: pixels the brush never
+# crosses keep an order-field value of 1 and would otherwise stall at mask 0.5
+# (see the draw loop and the cover frame below).
+SOFT = 0.012
+
 
 # --------------------------------------------------------------------- helpers
 def load_fit(path, w, h):
@@ -395,8 +401,7 @@ def main():
     OF = order_field(path, frac, H, W, brush_r)
 
     def stroke_frame(p):
-        soft = 0.012
-        mask = np.clip((p - OF) / soft + 0.5, 0.0, 1.0)
+        mask = np.clip((p - OF) / SOFT + 0.5, 0.0, 1.0)
         return empty_a * (1 - mask[..., None]) + crayon_a * mask[..., None]
 
     def ease(t):
@@ -406,7 +411,11 @@ def main():
     rng2 = np.random.default_rng(11)
     frames += [empty_a.copy() for _ in range(a.hold_empty)]
     for i in range(a.draw):
-        frames.append(stroke_frame(ease((i + 1) / a.draw)))
+        # Overshoot the progress past 1. Pixels the brush never crosses keep
+        # OF = 1, so at p = 1 exactly they land on mask = (1-1)/SOFT + 0.5 = 0.5
+        # -- a half-drawn ghost, i.e. the missing colour blocks. Running the
+        # progress to 1 + 2*SOFT pushes the tail of the ramp to a full 1.
+        frames.append(stroke_frame(ease((i + 1) / a.draw) * (1.0 + 2.0 * SOFT)))
     for _ in range(a.hold_crayon):
         if a.no_boiling:
             frames.append(crayon_a.copy())
@@ -423,14 +432,20 @@ def main():
     frames += [real_a.copy() for _ in range(a.hold_real)]
     print(f"frames {len(frames)}, duration {len(frames)/a.fps:.2f}s")
 
-    # ---- cover frame = the drawing-complete frame (last frame of the draw stage)
+    # ---- cover frame = the complete crayon drawing ---------------------------
     # The Live Photo should rest on the finished drawing, not on the plain photo:
-    # the drawing is the payoff, and the still must be the frame the drawing is
-    # complete in. Timestamp is the centre of that frame so the extractor in
-    # stage 4 lands on it rather than on the neighbouring one.
+    # the drawing is the payoff. The cover is taken from the crayon keyframe
+    # itself, not from whatever the soft-edged reveal produced on its last
+    # frame — the reveal is a ramp over the "order field", and any pixel the
+    # brush never crosses can only ever reach mask 0.5 there, which shows up as
+    # missing / washed-out colour blocks on the cover. The keyframe is by
+    # definition complete, so the cover is exact by construction.
     cover_i = min(a.hold_empty + a.draw - 1, len(frames) - 1)
+    frames[cover_i] = crayon_a.copy()
     cover_t = (cover_i + 0.5) / float(a.fps)
-    print(f"cover frame {cover_i} @ {cover_t:.4f}s  ->  stage 4: --still-time {cover_t:.4f}")
+    resid = float(np.abs(frames[cover_i] - crayon_a).mean())
+    print(f"cover frame {cover_i} @ {cover_t:.4f}s  ->  stage 4: --still-time {cover_t:.4f}"
+          f"   (complete drawing, residual {resid:.3f})")
     if not a.no_cover_png:
         cover_path = a.cover_png or (os.path.splitext(a.out)[0] + "-cover.png")
         Image.fromarray(frames[cover_i].astype(np.uint8)).save(cover_path)

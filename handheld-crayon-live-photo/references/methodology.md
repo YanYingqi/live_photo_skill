@@ -149,25 +149,40 @@ knobs and warnings are understandable.
    paint a disk of radius `--brush-r` and set `OF[disk] = min(OF[disk], f)`. Every
    pixel now holds *when* the brush reaches it.
 7. **Reveal.** At progress `p`, `mask = clip((p - OF)/soft + 0.5, 0, 1)`. As `p`
-   grows the brush travels the snake and colours stroke-by-stroke.
+   grows the brush travels the snake and colours stroke-by-stroke. The draw stage
+   runs `p` from 0 to `1 + 2*soft`, not to 1: pixels the brush never crosses keep
+   `OF = 1`, and at `p = 1` exactly they evaluate to `(1-1)/soft + 0.5 = 0.5` — a
+   half-drawn ghost. On a real photo that is ≈2 % of the silhouette sitting at
+   half opacity, i.e. missing or washed-out colour blocks at the moment the
+   drawing is supposedly finished. The overshoot pushes the tail of the ramp to a
+   full 1.
 8. **Timeline.** empty hold → stroke draw (the longest phase) → short crayon hold →
    crossfade morph to the real photo with a settle scale → real hold.
    The crayon hold is still by default; `--boiling` restores the ±1–2 px hand-drawn
    wobble for users who want it.
 9. **Export.** libx264 MP4 + a looping GIF (`--gif-scale`, sampled to ≈12 fps).
-10. **Cover frame.** The frame the still image should show is the
-    **drawing-complete frame** — the last frame of the draw stage, i.e. the
-    finished crayon drawing before the morph. The script computes its index
-    (`hold_empty + draw - 1`), prints the timestamp to pass on, and writes the
-    frame as `<out stem>-cover.png` for eyeballing:
+10. **Cover frame.** The frame the still image should show is the **complete
+    crayon drawing**, i.e. the crayon keyframe itself — not "whatever the
+    reveal happened to produce on its last frame". The script takes the cover
+    from the keyframe, prints the timestamp to pass on, and writes the frame as
+    `<out stem>-cover.png` for eyeballing:
 
     ```
-    cover frame 87 @ 2.9167s  ->  stage 4: --still-time 2.9167
+    cover frame 78 @ 2.6167s  ->  stage 4: --still-time 2.6167   (complete drawing, residual 0.000)
     ```
 
     The timestamp is the **centre** of that frame (`(i + 0.5) / fps`) so the
     AVAssetImageGenerator in stage 4 cannot snap to the neighbouring frame.
     `--cover-png` moves the file; `--no-cover-png` skips it.
+
+    Why the keyframe and not the last draw frame: the reveal is a ramp over the
+    order field, and any pixel the brush never crosses can only ever reach
+    mask 0.5 (see step 7). The overshoot fixes that in the animation, but the
+    cover is the one frame that must be provably complete — and a still image
+    is where a half-opacity block is most visible, because the viewer stares at
+    it. Taking it straight from the keyframe makes it exact by construction;
+    the printed `residual` is the mean `|cover − crayon|`, which is 0 when the
+    two agree.
 
     Why not the last frame: the last frame is the plain real photo, so the
     asset at rest looks like an ordinary picture and the drawing — the whole
@@ -256,6 +271,11 @@ Photo). For Live Photo output add `--max-seconds 4.6`, which rescales to
 - **"silhouette is very small" warning.** The object was not detected — either the
   threshold is too high for a low-saturation object, or the empty keyframe still
   contains a ghost of the object. Regenerate Stage 2 or set `--seed-x/--seed-y`.
+- **Missing / washed-out colour blocks at the end of the drawing.** Pixels the
+  pen path never crosses keep an order-field value of 1 and stall at mask 0.5.
+  The draw stage already overshoots `1 + 2*soft` to close that; if you change
+  `SOFT`, keep the overshoot tied to it, and check the cover's printed
+  `residual` is 0.000.
 - **Empty hand becomes a fist (or an open palm).** The prompt named a pose and
   the model substituted a canonical grip — most often a fist on wide objects
   that are actually held with a fanned grip. Remove every pose word from the
